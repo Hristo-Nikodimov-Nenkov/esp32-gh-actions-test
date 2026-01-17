@@ -1,0 +1,130 @@
+when:
+  event:
+    - push
+    - manual
+  branch:
+    - main
+
+steps:
+  - name: Set-up git
+    image: alpine:latest
+    environment:
+      GIT_USER_NAME:
+        from_secret: GIT_USER_NAME
+      GIT_USER_EMAIL:
+        from_secret: GIT_USER_EMAIL
+      GITHUB_TOKEN:
+        from_secret: GITHUB_TOKEN
+    commands: |
+      cd "$CI_WORKSPACE"
+      : > .env
+
+      apk add --no-cache git
+
+      git config user.name "$GIT_USER_NAME"
+      git config user.email "$GIT_USER_EMAIL"
+
+      git config --add safe.directory "$CI_WORKSPACE"
+
+      git remote set-url origin https://x-access-token:$GITHUB_TOKEN@github.com/$CI_REPO_OWNER/$CI_REPO_NAME.git
+      git branch --set-upstream-to=origin/main main || true
+
+      echo "GIT_USER_NAME=$GIT_USER_NAME" >> .env
+      echo "GIT_USER_EMAIL=$GIT_USER_EMAIL" >> .env
+      echo "GITHUB_TOKEN=$GITHUB_TOKEN" >> .env
+
+  - name: Build firmware
+    image: rav3nh01m/micropython_esp-idf:latest
+    environment:
+      BOARD: "ESP32_GENERIC_C3"
+      FREEZE_MAIN: "false"
+      FREEZE_BOOT: "false"
+    commands: |
+      /usr/local/bin/build_firmware.sh
+
+      echo "BOARD=$BOARD" >> .env
+      echo "FREEZE_MAIN=$FREEZE_MAIN" >> .env
+      echo "FREEZE_BOOT=$FREEZE_BOOT" >> .env
+
+  - name: Prepare files for release
+    image: alpine:latest
+    environment:
+      VERSION: 0
+      MAJOR: 0
+      MINOR: 2
+      OFFSET: 0
+    commands: |    
+      set -a
+      . "$CI_WORKSPACE/.env"
+      set +a
+
+      apk add --no-cache zip
+
+      BUILD_NUMBER=$(( CI_PIPELINE_NUMBER - OFFSET ))
+
+      BUILD_VERSION="v$VERSION.$MAJOR.$MINOR.$BUILD_NUMBER"
+      echo "================================================================================"
+      echo " Build version: $BUILD_VERSION"
+      echo "================================================================================"
+
+      # Rename main firmware
+      mv "$CI_WORKSPACE/dist/firmware.bin" "$CI_WORKSPACE/dist/rdm-rpcc_firmware_$BUILD_VERSION.bin"
+
+      # Zip main firmware
+      zip -j "$CI_WORKSPACE/dist/rdm-rpcc_firmware_$BUILD_VERSION.zip" "$CI_WORKSPACE/dist/rdm-rpcc_firmware_$BUILD_VERSION.bin"
+
+      # Zip the split binaries
+      zip -j "$CI_WORKSPACE/dist/rdm-rpcc_splitted_firmware_$BUILD_VERSION.zip" \
+        "$CI_WORKSPACE/dist/bootloader.bin" \
+        "$CI_WORKSPACE/dist/partition-table.bin" \
+        "$CI_WORKSPACE/dist/micropython.bin"
+
+      # Zip code folder (.vscode, lib, config, .micropico, optional main.py, optional boot.py )
+      mkdir -p "$CI_WORKSPACE/dist/code"
+      [ -d "$CI_WORKSPACE/.vscode" ] && cp -R "$CI_WORKSPACE/.vscode" "$CI_WORKSPACE/dist/code/"
+      [ -d "$CI_WORKSPACE/lib" ] && cp -R "$CI_WORKSPACE/lib" "$CI_WORKSPACE/dist/code/"
+      [ -f "$CI_WORKSPACE/.micropico" ] && cp "$CI_WORKSPACE/.micropico" "$CI_WORKSPACE/dist/code/"
+      [ "$FREEZE_MAIN" != "true" ] && cp "$CI_WORKSPACE/main.py" "$CI_WORKSPACE/dist/code/" || true
+      [ "$FREEZE_BOOT" != "true" ] && cp "$CI_WORKSPACE/boot.py" "$CI_WORKSPACE/dist/code/" || true
+      zip -r "$CI_WORKSPACE/dist/code_$BUILD_VERSION.zip" "$CI_WORKSPACE/dist/code"
+
+      cd "$CI_WORKSPACE"
+
+      echo "BUILD_VERSION=$BUILD_VERSION" >> .env
+      echo "VERSION=$VERSION" >> .env
+      echo "MAJOR=$MAJOR" >> .env
+      echo "MINOR=$MINOR" >> .env
+
+  - name: Create GitHub release
+    image: ubuntu:24.04
+    environment:
+      IS_PRERELEASE: "true"
+    commands: |
+      # Load environment variables from previous steps
+      set -a
+      . "$CI_WORKSPACE/.env"
+      set +a
+
+      apt-get update && apt-get install -y gh git zip ca-certificates
+      update-ca-certificates
+
+      # Create tag if it doesn't exist
+      git tag "$BUILD_VERSION" || true
+      git push origin "$BUILD_VERSION" || true
+
+      # Pre-release flag
+      PRERELEASE_FLAG=""
+      if [[ "${IS_PRERELEASE,,}" == "true" ]]; then
+          PRERELEASE_FLAG="--prerelease"
+      fi
+
+      # Create release if missing
+      gh release view "$BUILD_VERSION" >/dev/null 2>&1 || \
+      gh release create "$BUILD_VERSION" -t "$BUILD_VERSION" -n "Automated firmware release" $PRERELEASE_FLAG
+
+      # Upload assets
+      gh release upload "$BUILD_VERSION" "$CI_WORKSPACE/dist/rdm-rpcc_firmware_$BUILD_VERSION.zip" --clobber
+      gh release upload "$BUILD_VERSION" "$CI_WORKSPACE/dist/rdm-rpcc_splitted_firmware_$BUILD_VERSION.zip" --clobber
+      gh release upload "$BUILD_VERSION" "$CI_WORKSPACE/dist/code_$BUILD_VERSION.zip" --clobber
+
+
