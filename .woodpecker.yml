@@ -37,8 +37,8 @@ steps:
     image: rav3nh01m/micropython_esp-idf:latest
     environment:
       BOARD: "ESP32_GENERIC_C3"
-      FREEZE_MAIN: "false"
-      FREEZE_BOOT: "false"
+      FREEZE_MAIN: "true"
+      FREEZE_BOOT: "true"
     commands: |
       /usr/local/bin/build_firmware.sh
 
