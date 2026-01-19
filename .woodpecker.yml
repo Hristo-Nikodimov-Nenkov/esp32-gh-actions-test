@@ -34,7 +34,7 @@ steps:
       echo "GITHUB_TOKEN=$GITHUB_TOKEN" >> .env
 
   - name: Build firmware
-    image: rav3nh01m/micropython_esp-idf:v1.25_v5.2
+    image: rav3nh01m/micropython_esp-idf:v1.26_v5.4
     environment:
       BOARD: "ESP32_GENERIC_C3"
       FREEZE_MAIN: "true"
